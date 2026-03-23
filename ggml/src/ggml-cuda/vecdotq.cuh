@@ -1235,3 +1235,49 @@ static __device__ __forceinline__ float vec_dot_iq4_xs_q8_1(
     const float d = __half2float(bq4->d) * __low2float(bq8_1[iqs/4].ds);
     return d * sumi;
 }
+
+// TQ2_0: ternary weights {-1,0,+1} packed as 2-bit values {0,1,2} per element, 4 per byte
+// vec_dot parameters:
+//   kbx  = weight block index in the row
+//   iqs  = int32 column index within each Q8_1 block (0..QI_TQ2_0-1 = 0..7)
+// Each call reads one int32 from each of QR_TQ2_0=8 Q8_1 blocks (32 activations total)
+// and the corresponding 8 bytes from the TQ2_0 block (32 2-bit weight values).
+// The warp reduction sums QI_TQ2_0=8 partial results to cover all 256 elements.
+
+#define VDR_TQ2_0_Q8_1_MMVQ 1
+
+static __device__ __forceinline__ float vec_dot_tq2_0_q8_1(
+    const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs) {
+
+    const block_tq2_0 * bq = (const block_tq2_0 *) vbq + kbx;
+
+    // iqs selects the int32 column within each Q8_1 block.
+    // For Q8_1 block j, the activations are at bq8_1[j].qs[iqs] (4 INT8 values as int32).
+    // The TQ2_0 byte for group j at column iqs is bq->qs[j*(QK8_1/4) + iqs].
+
+    float sumf = 0.0f;
+
+#pragma unroll
+    for (int j = 0; j < QR_TQ2_0; ++j) {
+        // Load 4 activation INT8 values as a single int32
+        const int acts = get_int_b4(bq8_1[j].qs, iqs);
+
+        // Load 1 byte of TQ2_0 (4 2-bit weight values for group j, column iqs)
+        const uint32_t w_byte = (uint32_t) bq->qs[j * (QK8_1/4) + iqs];
+
+        // Expand 4 packed 2-bit values into 4 separate bytes of a uint32.
+        // bits 0-1 -> byte 0, bits 2-3 -> byte 1, bits 4-5 -> byte 2, bits 6-7 -> byte 3
+        uint32_t wvals = (w_byte & 0x03u)
+                       | ((w_byte & 0x0cu) << 6)
+                       | ((w_byte & 0x30u) << 12)
+                       | ((w_byte & 0xc0u) << 18);
+
+        // Subtract 1 from each INT8 byte: stored {0,1,2} -> decoded {-1,0,+1}
+        wvals = __vsubss4(wvals, 0x01010101u);
+
+        const int sumi = ggml_cuda_dp4a((int) wvals, acts, 0);
+        sumf += __half2float(bq8_1[j].ds.x) * sumi;
+    }
+
+    return __half2float(bq->d) * sumf;
+}
