@@ -2619,8 +2619,10 @@ static __device__ __forceinline__ void vec_dot_q6_K_q8_1_mma(
 #endif // AMD_MFMA_AVAILABLE || AMD_WMMA_AVAILABLE
 }
 // This is the first "simple" type with a block size of 256
-template <int mmq_y, int nwarps, bool need_check> static __device__ __forceinline__ void load_tiles_tq2_0(
+template <int mmq_y, bool need_check> static __device__ __forceinline__ void load_tiles_tq2_0(
     const char * __restrict__ x, int * __restrict__ x_tile, const int & kbx0, const int & i_max, const int & stride) {
+
+    constexpr int nwarps = mmq_get_nwarps_device();
 
 #ifdef INT8_MMA_AVAILABLE
     int   * x_qs = (int   *)  x_tile;
@@ -2684,9 +2686,11 @@ template <int mmq_y, int nwarps, bool need_check> static __device__ __forceinlin
     }
 }
 
-template <int mmq_x, int mmq_y, int nwarps>
+template <int mmq_x, int mmq_y>
 static __device__ __forceinline__ void vec_dot_tq2_0_q8_1_dp4a(
     const int * __restrict__ x, const int * __restrict__ y, float * __restrict__ sum, const int & k00) {
+
+    constexpr int nwarps = mmq_get_nwarps_device();
 
     constexpr tile_x_sizes txs = mmq_get_dp4a_tile_x_sizes(GGML_TYPE_TQ2_0, mmq_y);
     const int   * x_qs = (const int   *) x;
@@ -3400,12 +3404,12 @@ struct mmq_type_traits<mmq_x, mmq_y, need_check, GGML_TYPE_Q6_K> {
     static constexpr vec_dot_mmq_t    vec_dot_dp4a = vec_dot_q6_K_q8_1_dp4a<mmq_x, mmq_y>;
 };
 
-template <int mmq_x, int mmq_y, int nwarps, bool need_check>
-struct mmq_type_traits<mmq_x, mmq_y, nwarps, need_check, GGML_TYPE_TQ2_0> {
+template <int mmq_x, int mmq_y, bool need_check>
+struct mmq_type_traits<mmq_x, mmq_y, need_check, GGML_TYPE_TQ2_0> {
     static constexpr int              vdr          = VDR_TQ2_0_Q8_1_MMQ;
-    static constexpr load_tiles_mmq_t load_tiles   = load_tiles_tq2_0<mmq_y, nwarps, need_check>;
-    static constexpr vec_dot_mmq_t    vec_dot_mma  = vec_dot_q8_0_q8_1_mma<mmq_x, mmq_y, nwarps, MMQ_Q8_1_DS_LAYOUT_D4>;
-    static constexpr vec_dot_mmq_t    vec_dot_dp4a = vec_dot_tq2_0_q8_1_dp4a<mmq_x, mmq_y, nwarps>;
+    static constexpr load_tiles_mmq_t load_tiles   = load_tiles_tq2_0<mmq_y, need_check>;
+    static constexpr vec_dot_mmq_t    vec_dot_mma  = vec_dot_q8_0_q8_1_mma<mmq_x, mmq_y, MMQ_Q8_1_DS_LAYOUT_D4>;
+    static constexpr vec_dot_mmq_t    vec_dot_dp4a = vec_dot_tq2_0_q8_1_dp4a<mmq_x, mmq_y>;
 };
 
 template <int mmq_x, int mmq_y, bool need_check>
