@@ -2620,7 +2620,7 @@ static __device__ __forceinline__ void vec_dot_q6_K_q8_1_mma(
 }
 // This is the first "simple" type with a block size of 256
 template <int mmq_y, bool need_check> static __device__ __forceinline__ void load_tiles_tq2_0(
-    const char * __restrict__ x, int * __restrict__ x_tile, const int & kbx0, const int & i_max, const int & stride) {
+    const char * __restrict__ x, int * __restrict__ x_tile, const int kbx0, const int i_max, const int stride) {
 
     constexpr int nwarps = mmq_get_nwarps_device();
 
@@ -2688,7 +2688,7 @@ template <int mmq_y, bool need_check> static __device__ __forceinline__ void loa
 
 template <int mmq_x, int mmq_y>
 static __device__ __forceinline__ void vec_dot_tq2_0_q8_1_dp4a(
-    const int * __restrict__ x, const int * __restrict__ y, float * __restrict__ sum, const int & k00) {
+    const int * __restrict__ x, const int * __restrict__ y, float * __restrict__ sum, const int k00) {
 
     constexpr int nwarps = mmq_get_nwarps_device();
 
