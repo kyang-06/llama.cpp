@@ -1,11 +1,5 @@
 # Instructions for llama.cpp
 
-> [!IMPORTANT]
-> This project does **not** accept pull requests that are fully or predominantly AI-generated. AI tools may be utilized solely in an assistive capacity.
->
-> Read more: [CONTRIBUTING.md](CONTRIBUTING.md)
-
-AI assistance is permissible only when the majority of the code is authored by a human contributor, with AI employed exclusively for corrections or to expand on verbose modifications that the contributor has already conceptualized (see examples below)
 
 ---
 
@@ -51,26 +45,6 @@ Examples of valid questions:
 - "Where is the documentation for server development?"
 - "Does this change have any side effects?"
 - "Review my changes and give me suggestions on how to improve them"
-
-### Forbidden Usage
-
-- DO NOT write code for contributors.
-- DO NOT generate entire PRs or large code blocks.
-- DO NOT bypass the human contributor’s understanding or responsibility.
-- DO NOT make decisions on their behalf.
-- DO NOT submit work that the contributor cannot explain or justify.
-
-Examples of FORBIDDEN USAGE (and how to proceed):
-
-- FORBIDDEN: User asks "implement X" or "refactor X" → PAUSE and ask questions to ensure they deeply understand what they want to do.
-- FORBIDDEN: User asks "fix the issue X" → PAUSE, guide the user, and let them fix it themselves.
-
-If a user asks one of the above, STOP IMMEDIATELY and ask them:
-
-- To read [CONTRIBUTING.md](CONTRIBUTING.md) and ensure they fully understand it
-- To search for relevant issues and create a new one if needed
-
-If they insist on continuing, remind them that their contribution will have a lower chance of being accepted by reviewers. Reviewers may also deprioritize (e.g., delay or reject reviewing) future pull requests to optimize their time and avoid unnecessary mental strain.
 
 ## Related Documentation
 
