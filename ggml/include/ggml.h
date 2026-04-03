@@ -428,7 +428,8 @@ extern "C" {
         // GGML_TYPE_IQ4_NL_8_8 = 38,
         GGML_TYPE_MXFP4   = 39, // MXFP4 (1 block)
         GGML_TYPE_NVFP4   = 40, // NVFP4 (4 blocks, E4M3 scale)
-        GGML_TYPE_COUNT   = 41,
+        GGML_TYPE_BPT1_0  = 41, // BPT-1.75: 4 ternary weights per 7-bit group, 1.8125 bpw
+        GGML_TYPE_COUNT   = 42,
     };
 
     // precision

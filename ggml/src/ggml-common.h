@@ -175,6 +175,13 @@ typedef sycl::half2 ggml_half2;
 #define QR_TQ2_0 8
 #define QI_TQ2_0 (QK_K / (4*QR_TQ2_0))
 
+// BPT1_0: 1.8125 bpw (GOP-7 format: 4 ternary weights per 7-bit group, 64 groups/block)
+// qs[56] stores 64 groups packed at 7 bits each (8 groups per 7-byte supergroup)
+// qr = 8: one vec_dot call spans all 8 Q8_1 blocks; iqs selects the group-within-supergroup
+// qi = 8: 8 distinct iqs values cover the full block
+#define QR_BPT1_0 8
+#define QI_BPT1_0 (QK_K / (4*QR_BPT1_0))
+
 #endif // GGML_COMMON_DECL_CUDA || GGML_COMMON_DECL_HIP
 
 #ifdef _MSC_VER
@@ -278,6 +285,15 @@ typedef struct {
     ggml_half d;
 } block_tq2_0;
 static_assert(sizeof(block_tq2_0) == sizeof(ggml_half) + QK_K / 4, "wrong tq2_0 block size/padding");
+
+// 1.8125 bpw  (GOP-7: 4 ternary weights packed into 7 bits, 3^4=81 < 2^7=128)
+// 64 groups of 7 bits each = 448 bits = 56 bytes; 8 groups share a 7-byte "supergroup".
+// Supergroup k (k=0..7): bytes qs[7k..7k+6], groups g = k*8..k*8+7.
+typedef struct {
+    uint8_t qs[QK_K * 7 / 32]; // 7 bits per 4-weight group; 256*7/32 = 56 bytes
+    ggml_half d;
+} block_bpt1_0;
+static_assert(sizeof(block_bpt1_0) == sizeof(ggml_half) + QK_K * 7 / 32, "wrong bpt1_0 block size/padding");
 
 //
 // Super-block quantization structures
@@ -1111,6 +1127,35 @@ GGML_TABLE_END()
 // TODO: fix name to kvalues_iq4_nl
 GGML_TABLE_BEGIN(int8_t, kvalues_iq4nl, 16)
     -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113,
+GGML_TABLE_END()
+
+// BPT1_0 decode table: maps 7-bit group index i (0..80) to 4 packed int8 ternary weights.
+// Entry i encodes (w0, w1, w2, w3) where w_k = floor(i / 3^k) % 3 - 1 ∈ {-1, 0, +1}.
+// Packed as little-endian int32: byte0=w0, byte1=w1, byte2=w2, byte3=w3.
+// Indices 81..127 are unused (not representable in 4-trit base-3) and set to 0.
+// Usage: int wpack = (int)bpt1_0_lut[group_idx]; dp4a(wpack, acts, sumi);
+GGML_TABLE_BEGIN(uint32_t, bpt1_0_lut, 128)
+    // i=0..8   (w3=-1, w2=-1)
+    0xFFFFFFFFu, 0xFFFFFF00u, 0xFFFFFF01u,  0xFFFF00FFu, 0xFFFF0000u, 0xFFFF0001u,  0xFFFF01FFu, 0xFFFF0100u, 0xFFFF0101u,
+    // i=9..17  (w3=-1, w2=0)
+    0xFF00FFFFu, 0xFF00FF00u, 0xFF00FF01u,  0xFF0000FFu, 0xFF000000u, 0xFF000001u,  0xFF0001FFu, 0xFF000100u, 0xFF000101u,
+    // i=18..26 (w3=-1, w2=+1)
+    0xFF01FFFFu, 0xFF01FF00u, 0xFF01FF01u,  0xFF0100FFu, 0xFF010000u, 0xFF010001u,  0xFF0101FFu, 0xFF010100u, 0xFF010101u,
+    // i=27..35 (w3=0,  w2=-1)
+    0x00FFFFFFu, 0x00FFFF00u, 0x00FFFF01u,  0x00FF00FFu, 0x00FF0000u, 0x00FF0001u,  0x00FF01FFu, 0x00FF0100u, 0x00FF0101u,
+    // i=36..44 (w3=0,  w2=0)
+    0x0000FFFFu, 0x0000FF00u, 0x0000FF01u,  0x000000FFu, 0x00000000u, 0x00000001u,  0x000001FFu, 0x00000100u, 0x00000101u,
+    // i=45..53 (w3=0,  w2=+1)
+    0x0001FFFFu, 0x0001FF00u, 0x0001FF01u,  0x000100FFu, 0x00010000u, 0x00010001u,  0x000101FFu, 0x00010100u, 0x00010101u,
+    // i=54..62 (w3=+1, w2=-1)
+    0x01FFFFFFu, 0x01FFFF00u, 0x01FFFF01u,  0x01FF00FFu, 0x01FF0000u, 0x01FF0001u,  0x01FF01FFu, 0x01FF0100u, 0x01FF0101u,
+    // i=63..71 (w3=+1, w2=0)
+    0x0100FFFFu, 0x0100FF00u, 0x0100FF01u,  0x010000FFu, 0x01000000u, 0x01000001u,  0x010001FFu, 0x01000100u, 0x01000101u,
+    // i=72..80 (w3=+1, w2=+1)
+    0x0101FFFFu, 0x0101FF00u, 0x0101FF01u,  0x010100FFu, 0x01010000u, 0x01010001u,  0x010101FFu, 0x01010100u, 0x01010101u,
+    // i=81..127: unused (not valid 4-trit base-3 indices)
+    0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u,
+    0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u,
 GGML_TABLE_END()
 
 // e2m1 values (doubled)

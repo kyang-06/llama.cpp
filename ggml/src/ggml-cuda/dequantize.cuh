@@ -76,6 +76,51 @@ static __device__ __forceinline__ void dequantize_q8_0(const void * vx, const in
     v.y *= d;
 }
 
+// BPT1_0 dequantize: GOP-7 ternary, 4 weights per 7-bit group, 64 groups per QK_K block.
+// Storage: qs[56] packed with 8 groups per 7-byte supergroup.
+// For a given iqs (0..254, even), both iqs and iqs+1 fall in the same group since each group
+// covers 4 consecutive output elements and group boundaries are always multiples of 4.
+// Decoding: group_idx → 4 trits via base-3; bpt1_0_lut[group_idx] gives packed int8 form.
+static __device__ __forceinline__ void dequantize_bpt1_0(const void * vx, const int64_t ib, const int iqs, float2 & v) {
+    const block_bpt1_0 * x = (const block_bpt1_0 *) vx;
+    const float d = __half2float(x[ib].d);
+
+    // iqs is the output element index (0..254, even).
+    // Group index = iqs / 4; position within group = iqs % 4.
+    const int grp   = iqs / 4;          // 0..63
+    const int sg    = grp / 8;          // supergroup: 0..7
+    const int g     = grp % 8;          // group within supergroup: 0..7
+
+    // Extract the 7-bit group index from the 7-byte supergroup.
+    // Supergroup sg starts at qs[sg*7]. Groups are packed at 7*g bits within those 7 bytes.
+    uint32_t lo, hi;
+    const uint8_t * base = x[ib].qs + sg * 7;
+    memcpy(&lo, base + 0, 4);
+    memcpy(&hi, base + 3, 4);
+
+    int idx;
+    switch (g) {
+        case 0: idx =  (lo >>  0) & 0x7F; break;
+        case 1: idx =  (lo >>  7) & 0x7F; break;
+        case 2: idx =  (lo >> 14) & 0x7F; break;
+        case 3: idx =  (lo >> 21) & 0x7F; break;
+        case 4: idx = ((lo >> 28) & 0xF) | (((hi >>  8) & 0x7) << 4); break;
+        case 5: idx =  (hi >> 11) & 0x7F; break;
+        case 6: idx =  (hi >> 18) & 0x7F; break;
+        default: idx = (hi >> 25) & 0x7F; break;
+    }
+
+    // Decode the two weights at positions iqs%4 and (iqs+1)%4 within the group.
+    // Weights are packed little-endian: w0 = idx%3, w1 = (idx/3)%3, etc.
+    int pos = iqs & 3;  // 0 or 2 (iqs is even, so pos is 0 or 2)
+    // Advance to the requested trit position
+    int tmp = idx;
+    for (int i = 0; i < pos; i++) { tmp /= 3; }
+    v.x = d * (float)(tmp % 3 - 1);
+    tmp /= 3;
+    v.y = d * (float)(tmp % 3 - 1);
+}
+
 // TQ1_0 dequantize: 1.6875 bpw ternary, elements stored in mixed qs/qh arrays.
 // Layout: qs[48] holds 240 elements (5 trits/byte), qh[4] holds 16 elements (4 trits/byte).
 //

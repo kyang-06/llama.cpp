@@ -108,6 +108,12 @@ void quantize_row_tq2_0(const float * GGML_RESTRICT x, void * GGML_RESTRICT vy, 
     quantize_row_tq2_0_ref(x, y, k);
 }
 
+void quantize_row_bpt1_0(const float * GGML_RESTRICT x, void * GGML_RESTRICT vy, int64_t k) {
+    assert(k % QK_K == 0);
+    block_bpt1_0 * GGML_RESTRICT y = vy;
+    quantize_row_bpt1_0_ref(x, y, k);
+}
+
 //===================================== Q8_K ==============================================
 
 void quantize_row_q8_K_generic(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k) {
@@ -451,6 +457,45 @@ void ggml_vec_dot_tq2_0_q8_K_generic(int n, float * GGML_RESTRICT s, size_t bs, 
         const float d = y[i].d * GGML_CPU_FP16_TO_FP32(x[i].d);
 
         sumf += (float) sumi * d;
+    }
+
+    *s = sumf;
+}
+
+void ggml_vec_dot_bpt1_0_q8_K_generic(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
+    assert(nrc == 1);
+    UNUSED(nrc);
+    UNUSED(bx);
+    UNUSED(by);
+    UNUSED(bs);
+
+    const block_bpt1_0 * GGML_RESTRICT x = vx;
+    const block_q8_K   * GGML_RESTRICT y = vy;
+
+    const int nb = n / QK_K;
+    float sumf = 0.0f;
+
+    for (int i = 0; i < nb; ++i) {
+        int32_t sumi = 0;
+
+        // Decode 64 groups of 4 weights; Q8_K has 256 int8 activations in y[i].qs[0..255].
+        for (int sg = 0; sg < 8; sg++) {
+            // Load supergroup: 7 bytes -> 64-bit word (only low 56 bits used)
+            uint64_t word = 0;
+            for (int b = 0; b < 7; b++) {
+                word |= ((uint64_t)x[i].qs[sg * 7 + b]) << (b * 8);
+            }
+            for (int g = 0; g < 8; g++) {
+                int idx = (int)((word >> (g * 7)) & 0x7F);
+                const int base = (sg * 8 + g) * 4;
+                for (int w = 0; w < 4; w++) {
+                    sumi += (idx % 3 - 1) * (int)y[i].qs[base + w];
+                    idx /= 3;
+                }
+            }
+        }
+
+        sumf += (float)sumi * (y[i].d * GGML_CPU_FP16_TO_FP32(x[i].d));
     }
 
     *s = sumf;

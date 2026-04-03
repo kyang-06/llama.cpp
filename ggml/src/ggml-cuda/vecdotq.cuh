@@ -1236,6 +1236,59 @@ static __device__ __forceinline__ float vec_dot_iq4_xs_q8_1(
     return d * sumi;
 }
 
+// BPT1_0: GOP-7 ternary, 4 weights per 7-bit group, 8 groups per Q8_1 block (32 weights).
+//
+// Layout: qs[56] has 8 "supergroups", each 7 bytes encoding 8 groups for one Q8_1 block.
+// Supergroup j (j=0..7) <-> Q8_1 block j.
+// Within supergroup j, iqs (0..7) selects a single 4-weight group:
+//   Load lo = uint32(qs[j*7+0..3]), hi = uint32(qs[j*7+3..6]).
+//   Extract 7-bit index using the bit offsets for group iqs (same pattern as TQ1_0).
+//   Look up bpt1_0_lut[index] for packed int8 weights, then dp4a with activations.
+//
+// One call covers one 4-weight group from each of the 8 Q8_1 blocks = 32 products.
+// 8 iqs values × 32 products = 256 total, covering the full QK_K block.
+
+#define VDR_BPT1_0_Q8_1_MMVQ 1
+
+static __device__ __forceinline__ float vec_dot_bpt1_0_q8_1(
+    const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs) {
+
+    const block_bpt1_0 * bq = (const block_bpt1_0 *) vbq + kbx;
+
+    float sumf = 0.0f;
+
+#pragma unroll
+    for (int j = 0; j < QR_BPT1_0; ++j) {
+        // Load 4 activation int8 values from Q8_1 block j at column iqs
+        const int acts = get_int_b4(bq8_1[j].qs, iqs);
+
+        // Extract 7-bit group index from supergroup j, group iqs.
+        // Supergroup j occupies bytes qs[j*7..j*7+6]; groups are packed at 7*iqs bits.
+        uint32_t lo, hi;
+        const uint8_t * base = bq->qs + j * 7;
+        memcpy(&lo, base + 0, 4);
+        memcpy(&hi, base + 3, 4);
+
+        int idx;
+        switch (iqs) {
+            case 0: idx =  (lo >>  0) & 0x7F; break;
+            case 1: idx =  (lo >>  7) & 0x7F; break;
+            case 2: idx =  (lo >> 14) & 0x7F; break;
+            case 3: idx =  (lo >> 21) & 0x7F; break;
+            case 4: idx = ((lo >> 28) & 0xF) | (((hi >>  8) & 0x7) << 4); break;
+            case 5: idx =  (hi >> 11) & 0x7F; break;
+            case 6: idx =  (hi >> 18) & 0x7F; break;
+            default: idx = (hi >> 25) & 0x7F; break;
+        }
+
+        // LUT lookup: bpt1_0_lut[idx] packs 4 int8 weights for dp4a
+        const int wpack = (int)bpt1_0_lut[idx];
+        sumf += __half2float(bq8_1[j].ds.x) * ggml_cuda_dp4a(wpack, acts, 0);
+    }
+
+    return __half2float(bq->d) * sumf;
+}
+
 // TQ1_0: 1.6875 bpw ternary, two storage regions: qs[48] (240 elements) and qh[4] (16 elements).
 //
 // Weight layout vs Q8_1 activation blocks (each Q8_1 block holds 32 int8 = 8 int32):

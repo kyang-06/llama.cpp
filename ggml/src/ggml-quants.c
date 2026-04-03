@@ -2336,6 +2336,85 @@ void dequantize_row_tq2_0(const block_tq2_0 * GGML_RESTRICT x, float * GGML_REST
     }
 }
 
+// ====================== BPT1_0 (GOP-7 ternary) (de)-quantization
+
+void quantize_row_bpt1_0_ref(const float * GGML_RESTRICT x, block_bpt1_0 * GGML_RESTRICT y, int64_t k) {
+    assert(k % QK_K == 0);
+    const int64_t nb = k / QK_K;
+
+    for (int64_t i = 0; i < nb; i++) {
+        float amax = 0.0f;
+        for (int j = 0; j < QK_K; j++) {
+            const float v = x[j];
+            amax = MAX(amax, fabsf(v));
+        }
+
+        const float d  = amax;
+        const float id = d ? 1.0f / d : 0.0f;
+
+        y[i].d = GGML_FP32_TO_FP16(d);
+
+        // Pack 64 groups of 4 weights into qs[56] (7 bits per group).
+        // Supergroup sg (sg=0..7): 8 groups packed into 7 bytes starting at qs[sg*7].
+        // Group g within supergroup: bit offset g*7, spanning bytes [g*7/8 .. (g*7+6)/8].
+        // We build each supergroup as a 56-bit word, then write 7 bytes.
+        for (int sg = 0; sg < 8; sg++) {
+            uint64_t word = 0;
+            for (int g = 0; g < 8; g++) {
+                const int base = (sg * 8 + g) * 4;  // weight index of group start
+                uint8_t idx = 0;
+                for (int w = 3; w >= 0; w--) {
+                    int xi = (int)lroundf(x[base + w] * id) + 1; // {-1,0,1} -> {0,1,2}
+                    if (xi < 0) xi = 0;
+                    if (xi > 2) xi = 2;
+                    idx = (uint8_t)(idx * 3 + xi);  // base-3 big-endian: w3*27+w2*9+w1*3+w0
+                }
+                word |= ((uint64_t)idx << (g * 7));
+            }
+            // Write 7 bytes
+            for (int b = 0; b < 7; b++) {
+                y[i].qs[sg * 7 + b] = (uint8_t)(word >> (b * 8));
+            }
+        }
+        x += QK_K;
+    }
+}
+
+size_t quantize_bpt1_0(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrow, int64_t n_per_row, const float * quant_weights) {
+    (void)quant_weights;
+    const size_t row_size = ggml_row_size(GGML_TYPE_BPT1_0, n_per_row);
+    quantize_row_bpt1_0_ref(src, dst, (int64_t)nrow * n_per_row);
+    return nrow * row_size;
+}
+
+void dequantize_row_bpt1_0(const block_bpt1_0 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
+    assert(k % QK_K == 0);
+    const int64_t nb = k / QK_K;
+
+    for (int64_t i = 0; i < nb; ++i) {
+        const float d = GGML_FP16_TO_FP32(x[i].d);
+
+        // Decode 64 groups of 4 weights from qs[56].
+        // Supergroup sg: bytes qs[sg*7..sg*7+6], groups g=sg*8..sg*8+7 at bit offsets g*7.
+        for (int sg = 0; sg < 8; sg++) {
+            // Load 7 bytes into a 64-bit word
+            uint64_t word = 0;
+            for (int b = 0; b < 7; b++) {
+                word |= ((uint64_t)x[i].qs[sg * 7 + b]) << (b * 8);
+            }
+            for (int g = 0; g < 8; g++) {
+                int idx = (int)((word >> (g * 7)) & 0x7F);
+                const int base = (sg * 8 + g) * 4;
+                // Decode 4 trits from base-3 index (little-endian: w0 is least significant)
+                for (int w = 0; w < 4; w++) {
+                    y[base + w] = (float)(idx % 3 - 1) * d;
+                    idx /= 3;
+                }
+            }
+        }
+    }
+}
+
 // ====================== "True" 2-bit (de)-quantization
 
 void dequantize_row_iq2_xxs(const block_iq2_xxs * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
