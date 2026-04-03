@@ -1236,6 +1236,106 @@ static __device__ __forceinline__ float vec_dot_iq4_xs_q8_1(
     return d * sumi;
 }
 
+// TQ1_0: 1.6875 bpw ternary, two storage regions: qs[48] (240 elements) and qh[4] (16 elements).
+//
+// Weight layout vs Q8_1 activation blocks (each Q8_1 block holds 32 int8 = 8 int32):
+//   Q8_1 block j (j=0..4):  activation a = j*32 + iqs*4 + k ∈ [0,160)
+//     -> weight byte qs[iqs*4+k], trit j
+//   Q8_1 block 5, iqs=0..3: a = 160 + iqs*4 + k ∈ [160,176)
+//     -> weight byte qs[32+iqs*4+k], trit 0
+//   Q8_1 block 5, iqs=4..7: a = 160 + iqs*4 + k ∈ [176,192)
+//     -> weight byte qs[32+(iqs-4)*4+k], trit 1
+//   Q8_1 block 6, iqs=0..3: -> weight byte qs[32+iqs*4+k],     trit 2
+//   Q8_1 block 6, iqs=4..7: -> weight byte qs[32+(iqs-4)*4+k], trit 3
+//   Q8_1 block 7, iqs=0..3: -> weight byte qs[32+iqs*4+k],     trit 4
+//   Q8_1 block 7, iqs=4..7: -> weight byte qh[k],              trit (iqs-4)
+//
+// Trit extraction: decode_trit(byte, p) = ((uint8_t)(byte*p)*3u>>8) - 1, result in {-1,0,+1}.
+// One vec_dot call covers iqs (one int32 column across all 8 Q8_1 blocks), summing 32 products.
+// 8 iqs values × 32 products = 256 total, covering the whole QK_K block.
+
+#define VDR_TQ1_0_Q8_1_MMVQ 1
+
+static __device__ __forceinline__ float vec_dot_tq1_0_q8_1(
+    const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs) {
+
+    const block_tq1_0 * bq = (const block_tq1_0 *) vbq + kbx;
+
+    // pow3[n] = 3^n for n=0..5, used to extract trit n from a 5-trit-packed uint8.
+    // Extraction: q = (uint8_t)(byte * pow3[n]); weight = (int)((q*3u)>>8) - 1;
+    constexpr uint8_t pow3[5] = {1, 3, 9, 27, 81};
+
+    // Helper: pack 4 decoded weight bytes into one int32 for dp4a.
+    // Each weight is in {-1,0,+1} encoded as int8 {0xFF,0x00,0x01}.
+    auto make_wpack = [](uint8_t b0, uint8_t b1, uint8_t b2, uint8_t b3, uint8_t p) -> int {
+        const int8_t w0 = (int8_t)((((uint8_t)(b0 * p)) * 3u) >> 8) - 1;
+        const int8_t w1 = (int8_t)((((uint8_t)(b1 * p)) * 3u) >> 8) - 1;
+        const int8_t w2 = (int8_t)((((uint8_t)(b2 * p)) * 3u) >> 8) - 1;
+        const int8_t w3 = (int8_t)((((uint8_t)(b3 * p)) * 3u) >> 8) - 1;
+        return (int)(uint32_t)((uint8_t)w0 | ((uint8_t)w1 << 8) | ((uint8_t)w2 << 16) | ((uint8_t)w3 << 24));
+    };
+
+    float sumf = 0.0f;
+
+    // --- Part 1: Q8_1 blocks j=0..4 (activations 0..159) ---
+    // For block j: activation a = j*32 + iqs*4 + k  (k=0..3)
+    //   weight byte = qs[iqs*4+k], trit = j  (same 4 bytes for all j, different pow3)
+    const uint8_t * qs_col = bq->qs + iqs * 4;  // qs[iqs*4 .. iqs*4+3]
+
+#pragma unroll
+    for (int j = 0; j < 5; ++j) {
+        const int acts  = get_int_b4(bq8_1[j].qs, iqs);
+        const int wpack = make_wpack(qs_col[0], qs_col[1], qs_col[2], qs_col[3], pow3[j]);
+        sumf += __half2float(bq8_1[j].ds.x) * ggml_cuda_dp4a(wpack, acts, 0);
+    }
+
+    // --- Part 2: Q8_1 blocks j=5..7 (activations 160..255) ---
+    // The weight bytes depend on iqs (split at iqs=4).
+    if (iqs < 4) {
+        // iqs=0..3: weight bytes are qs[32+iqs*4 .. 35+iqs*4] for j=5,6,7
+        // j=5: trit 0 (pow3[0]=1), j=6: trit 2 (pow3[2]=9), j=7: trit 4 (pow3[4]=81)
+        const uint8_t * qb = bq->qs + 32 + iqs * 4;
+
+        // j=5, trit 0
+        sumf += __half2float(bq8_1[5].ds.x) * ggml_cuda_dp4a(
+            make_wpack(qb[0], qb[1], qb[2], qb[3], 1u),
+            get_int_b4(bq8_1[5].qs, iqs), 0);
+
+        // j=6, trit 2
+        sumf += __half2float(bq8_1[6].ds.x) * ggml_cuda_dp4a(
+            make_wpack(qb[0], qb[1], qb[2], qb[3], 9u),
+            get_int_b4(bq8_1[6].qs, iqs), 0);
+
+        // j=7, trit 4
+        sumf += __half2float(bq8_1[7].ds.x) * ggml_cuda_dp4a(
+            make_wpack(qb[0], qb[1], qb[2], qb[3], 81u),
+            get_int_b4(bq8_1[7].qs, iqs), 0);
+    } else {
+        // iqs=4..7: iqsh = iqs-4  (0..3)
+        // j=5,6: weight bytes qs[32+iqsh*4 .. 35+iqsh*4], trits 1,3
+        // j=7:   weight bytes qh[0..3],                   trit iqsh
+        const int iqsh = iqs - 4;
+        const uint8_t * qb = bq->qs + 32 + iqsh * 4;
+
+        // j=5, trit 1
+        sumf += __half2float(bq8_1[5].ds.x) * ggml_cuda_dp4a(
+            make_wpack(qb[0], qb[1], qb[2], qb[3], 3u),
+            get_int_b4(bq8_1[5].qs, iqs), 0);
+
+        // j=6, trit 3
+        sumf += __half2float(bq8_1[6].ds.x) * ggml_cuda_dp4a(
+            make_wpack(qb[0], qb[1], qb[2], qb[3], 27u),
+            get_int_b4(bq8_1[6].qs, iqs), 0);
+
+        // j=7: use qh, trit iqsh
+        sumf += __half2float(bq8_1[7].ds.x) * ggml_cuda_dp4a(
+            make_wpack(bq->qh[0], bq->qh[1], bq->qh[2], bq->qh[3], pow3[iqsh]),
+            get_int_b4(bq8_1[7].qs, iqs), 0);
+    }
+
+    return __half2float(bq->d) * sumf;
+}
+
 // TQ2_0: ternary weights {-1,0,+1} packed as 2-bit values {0,1,2} per element, 4 per byte
 // vec_dot parameters:
 //   kbx  = weight block index in the row

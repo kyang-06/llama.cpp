@@ -162,6 +162,13 @@ typedef sycl::half2 ggml_half2;
 #define QI3_S (QK_K / (4*QR3_S))
 #define QR3_S 4
 
+// TQ1_0: 1.6875 bpw ternary, block size QK_K=256
+// qs[48] stores 240 elements (5 trits/byte), qh[4] stores 16 elements (4 trits/byte)
+// qr = 8: each vec_dot call reads all 8 Q8_1 blocks (256/32) simultaneously
+// qi = 8: 8 distinct iqs values cover the full block
+#define QR_TQ1_0 8
+#define QI_TQ1_0 (QK_K / (4*QR_TQ1_0))
+
 // TQ2_0: 2 bits per element (ternary {-1,0,+1} stored as {0,1,2}), block size QK_K=256
 // qr = 8: each vec_dot call reads all 8 Q8_1 blocks (256/32) simultaneously
 // qi = 8: 8 distinct iqs values cover the full block
