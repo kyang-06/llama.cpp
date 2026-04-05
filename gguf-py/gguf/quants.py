@@ -653,6 +653,74 @@ class TQ2_0(__Quant, qtype=GGMLQuantizationType.TQ2_0):
         return (d * qs.astype(np.float32))
 
 
+class BPT1_0(__Quant, qtype=GGMLQuantizationType.BPT1_0):
+    # Bit-Plane Ternary: 4 ternary weights per 7-bit group (3^4=81 < 2^7=128)
+    # 64 groups per QK_K=256 block; 8 groups per supergroup (8*7=56 bits=7 bytes)
+    # Block layout: 56 bytes data + 2 bytes float16 scale = 58 bytes = 1.8125 bpw
+    @classmethod
+    def quantize_blocks(cls, blocks: np.ndarray) -> np.ndarray:
+        n_blocks = blocks.shape[0]
+
+        d = abs(blocks).max(axis=-1, keepdims=True)
+        with np.errstate(divide="ignore"):
+            id = np.where(d == 0, 0, 1 / d)
+        qs = np_roundf(blocks * id)
+        qs = (qs.astype(np.int8) + np.int8(1)).astype(np.uint8)  # {0,1,2}
+
+        # Encode: 4 weights → 7-bit base-3 index (w0 + w1*3 + w2*9 + w3*27)
+        qs = qs.reshape((n_blocks, 64, 4))
+        idx = (qs[..., 0].astype(np.uint64)
+               + qs[..., 1].astype(np.uint64) * np.uint64(3)
+               + qs[..., 2].astype(np.uint64) * np.uint64(9)
+               + qs[..., 3].astype(np.uint64) * np.uint64(27))  # (n_blocks, 64)
+
+        # Pack 8 groups (7 bits each) into a 56-bit (uint64) supergroup
+        idx = idx.reshape((n_blocks, 8, 8))
+        packed = (idx[..., 0]
+                  | (idx[..., 1] << np.uint64(7))
+                  | (idx[..., 2] << np.uint64(14))
+                  | (idx[..., 3] << np.uint64(21))
+                  | (idx[..., 4] << np.uint64(28))
+                  | (idx[..., 5] << np.uint64(35))
+                  | (idx[..., 6] << np.uint64(42))
+                  | (idx[..., 7] << np.uint64(49)))  # (n_blocks, 8)
+
+        # Extract 7 bytes per supergroup
+        shifts = np.array([0, 8, 16, 24, 32, 40, 48], dtype=np.uint64)
+        out_qs = (packed[..., np.newaxis] >> shifts).astype(np.uint8)  # (n_blocks, 8, 7)
+        out_qs = out_qs.reshape((n_blocks, 56))
+
+        d = d.astype(np.float16).view(np.uint8)
+        return np.concatenate([out_qs, d], axis=-1)
+
+    @classmethod
+    def dequantize_blocks(cls, blocks: np.ndarray) -> np.ndarray:
+        n_blocks = blocks.shape[0]
+
+        qs, d = np.hsplit(blocks, [56])
+        d = d.view(np.float16).astype(np.float32)
+
+        # Reconstruct uint64 from 7 bytes per supergroup
+        qs = qs.reshape((n_blocks, 8, 7)).astype(np.uint64)
+        shifts = np.array([0, 8, 16, 24, 32, 40, 48], dtype=np.uint64)
+        packed = np.sum(qs << shifts, axis=-1)  # (n_blocks, 8)
+
+        # Extract 8 groups of 7 bits each
+        group_shifts = np.array([0, 7, 14, 21, 28, 35, 42, 49], dtype=np.uint64)
+        idx = ((packed[..., np.newaxis] >> group_shifts) & np.uint64(0x7F)).reshape((n_blocks, 64))  # (n_blocks, 64)
+
+        # Decode 4 ternary weights from base-3 index
+        w0 = (idx % np.uint64(3)).astype(np.int8) - np.int8(1)
+        idx //= np.uint64(3)
+        w1 = (idx % np.uint64(3)).astype(np.int8) - np.int8(1)
+        idx //= np.uint64(3)
+        w2 = (idx % np.uint64(3)).astype(np.int8) - np.int8(1)
+        w3 = (idx // np.uint64(3)).astype(np.int8) - np.int8(1)
+
+        weights = np.stack([w0, w1, w2, w3], axis=-1).reshape((n_blocks, 256))
+        return d * weights.astype(np.float32)
+
+
 class MXFP4(__Quant, qtype=GGMLQuantizationType.MXFP4):
     # e2m1 values (doubled)
     # ref: https://www.opencompute.org/documents/ocp-microscaling-formats-mx-v1-0-spec-final-pdf
