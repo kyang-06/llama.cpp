@@ -1242,47 +1242,59 @@ static __device__ __forceinline__ float vec_dot_iq4_xs_q8_1(
 // Supergroup j (j=0..7) <-> Q8_1 block j.
 // Within supergroup j, iqs (0..7) selects a single 4-weight group:
 //   Load lo = uint32(qs[j*7+0..3]), hi = uint32(qs[j*7+3..6]).
-//   Extract 7-bit index using the bit offsets for group iqs (same pattern as TQ1_0).
-//   Look up bpt1_0_lut[index] for packed int8 weights, then dp4a with activations.
-//
-// One call covers one 4-weight group from each of the 8 Q8_1 blocks = 32 products.
-// 8 iqs values × 32 products = 256 total, covering the full QK_K block.
+//   Reconstruct 56-bit supergroup: sg = lo | (hi << 24)  (bytes 3..6 overlap correctly).
+//   Extract 7-bit index: (sg >> (7*iqs)) & 0x7F  -- no switch needed.
+//   Decode 4 ternary weights arithmetically via reciprocal-multiply (avoids LUT).
 
 #define VDR_BPT1_0_Q8_1_MMVQ 1
+
+// Arithmetic base-3 decode: 4 ternary weights {-1,0,+1} from 7-bit index ∈ [0,80].
+// Division by 3 via multiply-by-reciprocal (valid for inputs < 2^14).
+static __device__ __forceinline__ int bpt1_0_decode4(uint32_t idx) {
+    const uint32_t q0 = (idx * 0xAAAAAAABu) >> 33;   // floor(idx / 3)
+    const uint32_t q1 = (q0  * 0xAAAAAAABu) >> 33;   // floor(idx / 9)
+    const uint32_t q2 = (q1  * 0xAAAAAAABu) >> 33;   // floor(idx / 27)
+    const int w0 = (int)(idx - q0 * 3u) - 1;          // (idx%3)  - 1 ∈ {-1,0,+1}
+    const int w1 = (int)(q0  - q1 * 3u) - 1;
+    const int w2 = (int)(q1  - q2 * 3u) - 1;
+    const int w3 = (int)q2 - 1;                        // q2 = floor(idx/27) ∈ {0,1,2}
+    return (w0 & 0xFF) | ((w1 & 0xFF) << 8) | ((w2 & 0xFF) << 16) | ((w3 & 0xFF) << 24);
+}
 
 static __device__ __forceinline__ float vec_dot_bpt1_0_q8_1(
     const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs) {
 
     const block_bpt1_0 * bq = (const block_bpt1_0 *) vbq + kbx;
 
+    // Bit offset of group iqs within each 56-bit supergroup.
+    // Constant per thread (iqs does not change across the j-loop).
+    const int shift = iqs * 7;
+
     float sumf = 0.0f;
 
 #pragma unroll
     for (int j = 0; j < QR_BPT1_0; ++j) {
-        // Load 4 activation int8 values from Q8_1 block j at column iqs
-        const int acts = get_int_b4(bq8_1[j].qs, iqs);
-
-        // Extract 7-bit group index from supergroup j, group iqs.
-        // Supergroup j occupies bytes qs[j*7..j*7+6]; groups are packed at 7*iqs bits.
-        uint32_t lo, hi;
         const uint8_t * base = bq->qs + j * 7;
-        memcpy(&lo, base + 0, 4);
-        memcpy(&hi, base + 3, 4);
 
-        int idx;
-        switch (iqs) {
-            case 0: idx =  (lo >>  0) & 0x7F; break;
-            case 1: idx =  (lo >>  7) & 0x7F; break;
-            case 2: idx =  (lo >> 14) & 0x7F; break;
-            case 3: idx =  (lo >> 21) & 0x7F; break;
-            case 4: idx = ((lo >> 28) & 0xF) | (((hi >>  8) & 0x7) << 4); break;
-            case 5: idx =  (hi >> 11) & 0x7F; break;
-            case 6: idx =  (hi >> 18) & 0x7F; break;
-            default: idx = (hi >> 25) & 0x7F; break;
-        }
+        // Load only the 32-bit word(s) needed for this iqs:
+        //   iqs 0-3: bits [0:31]  -> lo only
+        //   iqs 4:   both lo and hi (group straddles the lo/hi boundary)
+        //   iqs 5-7: bits [24:55] -> hi only
+        // Predicated loads — no warp divergence, just masked execution.
+        uint32_t lo = 0, hi = 0;
+        if (iqs <= 4) memcpy(&lo, base,     4);
+        if (iqs >= 4) memcpy(&hi, base + 3, 4);
 
-        // LUT lookup: bpt1_0_lut[idx] packs 4 int8 weights for dp4a
-        const int wpack = (int)bpt1_0_lut[idx];
+        // Reconstruct the 56-bit supergroup as a 64-bit integer, then extract
+        // the 7-bit group index with a single variable shift.
+        //   sg bit k (0≤k≤55): bytes 0..3 in lo, bytes 3..6 in hi (overlap at byte 3 is consistent).
+        const uint64_t sg  = (uint64_t)lo | ((uint64_t)hi << 24);
+        const int      idx = (int)((sg >> shift) & 0x7F);
+
+        // Decode weights arithmetically — no LUT random access.
+        const int wpack = bpt1_0_decode4((uint32_t)idx);
+
+        const int acts = get_int_b4(bq8_1[j].qs, iqs);
         sumf += __half2float(bq8_1[j].ds.x) * ggml_cuda_dp4a(wpack, acts, 0);
     }
 
