@@ -102,9 +102,9 @@ static __device__ __forceinline__ void dequantize_bpt1_0(const void * vx, const 
     const uint32_t idx  = (uint32_t)((sg64 >> (g * 7)) & 0x7F);
 
     // Arithmetic base-3 decode — no loop, no LUT.
-    const uint32_t q0 = (idx * 0xAAAAAAABu) >> 33;  // floor(idx / 3)
-    const uint32_t q1 = (q0  * 0xAAAAAAABu) >> 33;  // floor(idx / 9)
-    const uint32_t q2 = (q1  * 0xAAAAAAABu) >> 33;  // floor(idx / 27)
+    const uint32_t q0 = __umulhi(idx, 0xAAAAAAABu) >> 1;  // floor(idx / 3)
+    const uint32_t q1 = __umulhi(q0,  0xAAAAAAABu) >> 1;  // floor(idx / 9)
+    const uint32_t q2 = __umulhi(q1,  0xAAAAAAABu) >> 1;  // floor(idx / 27)
 
     // pos=0: weights 0 and 1;  pos=2: weights 2 and 3
     int wa, wb;

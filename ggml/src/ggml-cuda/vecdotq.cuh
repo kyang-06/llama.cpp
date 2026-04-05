@@ -1249,11 +1249,13 @@ static __device__ __forceinline__ float vec_dot_iq4_xs_q8_1(
 #define VDR_BPT1_0_Q8_1_MMVQ 1
 
 // Arithmetic base-3 decode: 4 ternary weights {-1,0,+1} from 7-bit index ∈ [0,80].
-// Division by 3 via multiply-by-reciprocal (valid for inputs < 2^14).
+// Division by 3 via __umulhi: __umulhi(x, 0xAAAAAAAB) >> 1 == floor(x / 3)
+// (__umulhi returns the high 32 bits of the 64-bit product, i.e. (x*M)>>32;
+//  shifting one more bit gives (x*0xAAAAAAAB)>>33 = floor(x/3) for x < 2^31.)
 static __device__ __forceinline__ int bpt1_0_decode4(uint32_t idx) {
-    const uint32_t q0 = (idx * 0xAAAAAAABu) >> 33;   // floor(idx / 3)
-    const uint32_t q1 = (q0  * 0xAAAAAAABu) >> 33;   // floor(idx / 9)
-    const uint32_t q2 = (q1  * 0xAAAAAAABu) >> 33;   // floor(idx / 27)
+    const uint32_t q0 = __umulhi(idx, 0xAAAAAAABu) >> 1;  // floor(idx / 3)
+    const uint32_t q1 = __umulhi(q0,  0xAAAAAAABu) >> 1;  // floor(idx / 9)
+    const uint32_t q2 = __umulhi(q1,  0xAAAAAAABu) >> 1;  // floor(idx / 27)
     const int w0 = (int)(idx - q0 * 3u) - 1;          // (idx%3)  - 1 ∈ {-1,0,+1}
     const int w1 = (int)(q0  - q1 * 3u) - 1;
     const int w2 = (int)(q1  - q2 * 3u) - 1;
