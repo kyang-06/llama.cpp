@@ -117,7 +117,8 @@ class ModelBase:
                  small_first_shard: bool = False, hparams: dict[str, Any] | None = None, remote_hf_model_id: str | None = None,
                  disable_mistral_community_chat_template: bool = False,
                  sentence_transformers_dense_modules: bool = False,
-                 fuse_gate_up_exps: bool = False):
+                 fuse_gate_up_exps: bool = False,
+                 embd_qtype: gguf.GGMLQuantizationType | None = None):
         if type(self) is ModelBase or \
                 type(self) is TextModel or \
                 type(self) is MmprojModel:
@@ -128,6 +129,7 @@ class ModelBase:
 
         self.dir_model = dir_model
         self.ftype = ftype
+        self.embd_qtype = embd_qtype
         self.fname_out = fname_out
         self.is_big_endian = is_big_endian
         self.endianess = gguf.GGUFEndian.BIG if is_big_endian else gguf.GGUFEndian.LITTLE
@@ -818,12 +820,13 @@ class ModelBase:
                         gguf.MODEL_TENSOR.LAUREL_R,
                     )
                 ):
-                    if self.ftype in (
+                    if self.embd_qtype is not None:
+                        data_qtype = self.embd_qtype
+                    elif self.ftype in (
                         gguf.LlamaFileType.MOSTLY_TQ1_0,
                         gguf.LlamaFileType.MOSTLY_TQ2_0,
                         gguf.LlamaFileType.MOSTLY_BPT1_0,
                     ):
-                        # TODO: use Q4_K and Q6_K
                         data_qtype = gguf.GGMLQuantizationType.F16
 
                 # No override (data_qtype is False), or wants to be quantized (data_qtype is True)
@@ -12299,6 +12302,13 @@ def parse_args() -> argparse.Namespace:
         help="output format - use f32 for float32, f16 for float16, bf16 for bfloat16, q8_0 for Q8_0, tq1_0 or tq2_0 for ternary, bpt1_0 for BPT-1.75 ternary, and auto for the highest-fidelity 16-bit float type",
     )
     parser.add_argument(
+        "--embd-outtype", type=str,
+        choices=["f32", "f16", "bf16", "q8_0", "q4_k", "q5_k", "q6_k", "q8_k"],
+        default=None,
+        help="quantization type for embedding and output tensors (token_embd, output); "
+             "defaults to f16 for ternary formats and the global --outtype for others",
+    )
+    parser.add_argument(
         "--bigendian", action="store_true",
         help="model is executed on big endian machine",
     )
@@ -12509,6 +12519,18 @@ def main() -> None:
         else:
             model_class = MistralModel
 
+        embd_type_map: dict[str, gguf.GGMLQuantizationType] = {
+            "f32":  gguf.GGMLQuantizationType.F32,
+            "f16":  gguf.GGMLQuantizationType.F16,
+            "bf16": gguf.GGMLQuantizationType.BF16,
+            "q8_0": gguf.GGMLQuantizationType.Q8_0,
+            "q4_k": gguf.GGMLQuantizationType.Q4_K,
+            "q5_k": gguf.GGMLQuantizationType.Q5_K,
+            "q6_k": gguf.GGMLQuantizationType.Q6_K,
+            "q8_k": gguf.GGMLQuantizationType.Q8_K,
+        }
+        embd_qtype = embd_type_map[args.embd_outtype] if args.embd_outtype is not None else None
+
         model_instance = model_class(dir_model, output_type, fname_out,
                                      is_big_endian=args.bigendian, use_temp_file=args.use_temp_file,
                                      eager=args.no_lazy,
@@ -12518,7 +12540,8 @@ def main() -> None:
                                      small_first_shard=args.no_tensor_first_split,
                                      remote_hf_model_id=hf_repo_id, disable_mistral_community_chat_template=disable_mistral_community_chat_template,
                                      sentence_transformers_dense_modules=args.sentence_transformers_dense_modules,
-                                     fuse_gate_up_exps=args.fuse_gate_up_exps
+                                     fuse_gate_up_exps=args.fuse_gate_up_exps,
+                                     embd_qtype=embd_qtype,
                                      )
 
         if args.vocab_only:
