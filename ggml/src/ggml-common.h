@@ -1129,35 +1129,6 @@ GGML_TABLE_BEGIN(int8_t, kvalues_iq4nl, 16)
     -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113,
 GGML_TABLE_END()
 
-// BPT1_0 decode table: maps 7-bit group index i (0..80) to 4 packed int8 ternary weights.
-// Entry i encodes (w0, w1, w2, w3) where w_k = floor(i / 3^k) % 3 - 1 ∈ {-1, 0, +1}.
-// Packed as little-endian int32: byte0=w0, byte1=w1, byte2=w2, byte3=w3.
-// Indices 81..127 are unused (not representable in 4-trit base-3) and set to 0.
-// Usage: int wpack = (int)bpt1_0_lut[group_idx]; dp4a(wpack, acts, sumi);
-GGML_TABLE_BEGIN(uint32_t, bpt1_0_lut, 128)
-    // i=0..8   (w3=-1, w2=-1)
-    0xFFFFFFFFu, 0xFFFFFF00u, 0xFFFFFF01u,  0xFFFF00FFu, 0xFFFF0000u, 0xFFFF0001u,  0xFFFF01FFu, 0xFFFF0100u, 0xFFFF0101u,
-    // i=9..17  (w3=-1, w2=0)
-    0xFF00FFFFu, 0xFF00FF00u, 0xFF00FF01u,  0xFF0000FFu, 0xFF000000u, 0xFF000001u,  0xFF0001FFu, 0xFF000100u, 0xFF000101u,
-    // i=18..26 (w3=-1, w2=+1)
-    0xFF01FFFFu, 0xFF01FF00u, 0xFF01FF01u,  0xFF0100FFu, 0xFF010000u, 0xFF010001u,  0xFF0101FFu, 0xFF010100u, 0xFF010101u,
-    // i=27..35 (w3=0,  w2=-1)
-    0x00FFFFFFu, 0x00FFFF00u, 0x00FFFF01u,  0x00FF00FFu, 0x00FF0000u, 0x00FF0001u,  0x00FF01FFu, 0x00FF0100u, 0x00FF0101u,
-    // i=36..44 (w3=0,  w2=0)
-    0x0000FFFFu, 0x0000FF00u, 0x0000FF01u,  0x000000FFu, 0x00000000u, 0x00000001u,  0x000001FFu, 0x00000100u, 0x00000101u,
-    // i=45..53 (w3=0,  w2=+1)
-    0x0001FFFFu, 0x0001FF00u, 0x0001FF01u,  0x000100FFu, 0x00010000u, 0x00010001u,  0x000101FFu, 0x00010100u, 0x00010101u,
-    // i=54..62 (w3=+1, w2=-1)
-    0x01FFFFFFu, 0x01FFFF00u, 0x01FFFF01u,  0x01FF00FFu, 0x01FF0000u, 0x01FF0001u,  0x01FF01FFu, 0x01FF0100u, 0x01FF0101u,
-    // i=63..71 (w3=+1, w2=0)
-    0x0100FFFFu, 0x0100FF00u, 0x0100FF01u,  0x010000FFu, 0x01000000u, 0x01000001u,  0x010001FFu, 0x01000100u, 0x01000101u,
-    // i=72..80 (w3=+1, w2=+1)
-    0x0101FFFFu, 0x0101FF00u, 0x0101FF01u,  0x010100FFu, 0x01010000u, 0x01010001u,  0x010101FFu, 0x01010100u, 0x01010101u,
-    // i=81..127: unused (not valid 4-trit base-3 indices)
-    0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u,
-    0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u,
-GGML_TABLE_END()
-
 // e2m1 values (doubled)
 // ref: https://www.opencompute.org/documents/ocp-microscaling-formats-mx-v1-0-spec-final-pdf
 GGML_TABLE_BEGIN(int8_t, kvalues_mxfp4, 16)

@@ -80,45 +80,43 @@ static __device__ __forceinline__ void dequantize_q8_0(const void * vx, const in
 // Storage: qs[56] packed with 8 groups per 7-byte supergroup.
 // For a given iqs (0..254, even), both iqs and iqs+1 fall in the same group since each group
 // covers 4 consecutive output elements and group boundaries are always multiples of 4.
-// Decoding: group_idx → 4 trits via base-3; bpt1_0_lut[group_idx] gives packed int8 form.
+// Decoding: arithmetic base-3 via reciprocal-multiply, no LUT or switch needed.
 static __device__ __forceinline__ void dequantize_bpt1_0(const void * vx, const int64_t ib, const int iqs, float2 & v) {
     const block_bpt1_0 * x = (const block_bpt1_0 *) vx;
     const float d = __half2float(x[ib].d);
 
     // iqs is the output element index (0..254, even).
-    // Group index = iqs / 4; position within group = iqs % 4.
-    const int grp   = iqs / 4;          // 0..63
-    const int sg    = grp / 8;          // supergroup: 0..7
-    const int g     = grp % 8;          // group within supergroup: 0..7
+    // Group index = iqs / 4; position within group = iqs & 3 (0 or 2 since iqs is even).
+    const int grp = iqs / 4;   // 0..63
+    const int sg  = grp / 8;   // supergroup: 0..7
+    const int g   = grp & 7;   // group within supergroup: 0..7
+    const int pos = iqs & 3;   // 0 or 2
 
-    // Extract the 7-bit group index from the 7-byte supergroup.
-    // Supergroup sg starts at qs[sg*7]. Groups are packed at 7*g bits within those 7 bytes.
-    uint32_t lo, hi;
+    // Extract the 7-bit group index using 64-bit reconstruction (no switch).
+    // lo = bits [31:0], hi<<24 = bits [55:24] of the 56-bit supergroup.
     const uint8_t * base = x[ib].qs + sg * 7;
-    memcpy(&lo, base + 0, 4);
-    memcpy(&hi, base + 3, 4);
+    uint32_t lo = 0, hi = 0;
+    if (g <= 4) memcpy(&lo, base,     4);
+    if (g >= 4) memcpy(&hi, base + 3, 4);
+    const uint64_t sg64 = (uint64_t)lo | ((uint64_t)hi << 24);
+    const uint32_t idx  = (uint32_t)((sg64 >> (g * 7)) & 0x7F);
 
-    int idx;
-    switch (g) {
-        case 0: idx =  (lo >>  0) & 0x7F; break;
-        case 1: idx =  (lo >>  7) & 0x7F; break;
-        case 2: idx =  (lo >> 14) & 0x7F; break;
-        case 3: idx =  (lo >> 21) & 0x7F; break;
-        case 4: idx = ((lo >> 28) & 0xF) | (((hi >>  8) & 0x7) << 4); break;
-        case 5: idx =  (hi >> 11) & 0x7F; break;
-        case 6: idx =  (hi >> 18) & 0x7F; break;
-        default: idx = (hi >> 25) & 0x7F; break;
+    // Arithmetic base-3 decode — no loop, no LUT.
+    const uint32_t q0 = (idx * 0xAAAAAAABu) >> 33;  // floor(idx / 3)
+    const uint32_t q1 = (q0  * 0xAAAAAAABu) >> 33;  // floor(idx / 9)
+    const uint32_t q2 = (q1  * 0xAAAAAAABu) >> 33;  // floor(idx / 27)
+
+    // pos=0: weights 0 and 1;  pos=2: weights 2 and 3
+    int wa, wb;
+    if (pos == 0) {
+        wa = (int)(idx - q0 * 3u) - 1;   // w[0] = idx%3   - 1
+        wb = (int)(q0  - q1 * 3u) - 1;   // w[1] = (idx/3)%3 - 1
+    } else {
+        wa = (int)(q1  - q2 * 3u) - 1;   // w[2] = (idx/9)%3 - 1
+        wb = (int)q2 - 1;                  // w[3] = idx/27  - 1
     }
-
-    // Decode the two weights at positions iqs%4 and (iqs+1)%4 within the group.
-    // Weights are packed little-endian: w0 = idx%3, w1 = (idx/3)%3, etc.
-    int pos = iqs & 3;  // 0 or 2 (iqs is even, so pos is 0 or 2)
-    // Advance to the requested trit position
-    int tmp = idx;
-    for (int i = 0; i < pos; i++) { tmp /= 3; }
-    v.x = d * (float)(tmp % 3 - 1);
-    tmp /= 3;
-    v.y = d * (float)(tmp % 3 - 1);
+    v.x = d * (float)wa;
+    v.y = d * (float)wb;
 }
 
 // TQ1_0 dequantize: 1.6875 bpw ternary, elements stored in mixed qs/qh arrays.
