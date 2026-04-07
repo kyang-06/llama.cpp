@@ -1249,18 +1249,25 @@ static __device__ __forceinline__ float vec_dot_iq4_xs_q8_1(
 #define VDR_BPT1_0_Q8_1_MMVQ 1
 
 // Arithmetic base-3 decode: 4 ternary weights {-1,0,+1} from 7-bit index ∈ [0,80].
-// Division by 3 via __umulhi: __umulhi(x, 0xAAAAAAAB) >> 1 == floor(x / 3)
-// (__umulhi returns the high 32 bits of the 64-bit product, i.e. (x*M)>>32;
-//  shifting one more bit gives (x*0xAAAAAAAB)>>33 = floor(x/3) for x < 2^31.)
+//
+// All three quotients are computed directly from idx (independent, no serial chain):
+//   floor(idx/ 3) via __umulhi(idx, 0xAAAAAAABu) >> 1   (= (idx*0xAAAAAAAB) >> 33)
+//   floor(idx/ 9) via __umulhi(idx, 0x1C71C71Du)         (= (idx*0x1C71C71D) >> 32)
+//   floor(idx/27) via __umulhi(idx, 0x097B425Fu)         (= (idx*0x097B425F) >> 32)
+// All verified correct for idx ∈ [0, 80].
+//
+// Remainders give ternary digits ∈ {0,1,2}; each fits in one byte with no masking needed.
+// __vsubss4 subtracts 1 from all 4 bytes in a single PTX instruction.
 static __device__ __forceinline__ int bpt1_0_decode4(uint32_t idx) {
-    const uint32_t q0 = __umulhi(idx, 0xAAAAAAABu) >> 1;  // floor(idx / 3)
-    const uint32_t q1 = __umulhi(q0,  0xAAAAAAABu) >> 1;  // floor(idx / 9)
-    const uint32_t q2 = __umulhi(q1,  0xAAAAAAABu) >> 1;  // floor(idx / 27)
-    const int w0 = (int)(idx - q0 * 3u) - 1;          // (idx%3)  - 1 ∈ {-1,0,+1}
-    const int w1 = (int)(q0  - q1 * 3u) - 1;
-    const int w2 = (int)(q1  - q2 * 3u) - 1;
-    const int w3 = (int)q2 - 1;                        // q2 = floor(idx/27) ∈ {0,1,2}
-    return (w0 & 0xFF) | ((w1 & 0xFF) << 8) | ((w2 & 0xFF) << 16) | ((w3 & 0xFF) << 24);
+    const uint32_t q0 = __umulhi(idx, 0xAAAAAAABu) >> 1;  // floor(idx /  3)
+    const uint32_t q1 = __umulhi(idx, 0x1C71C71Du);        // floor(idx /  9)  — independent of q0
+    const uint32_t q2 = __umulhi(idx, 0x097B425Fu);        // floor(idx / 27)  — independent of q0, q1
+    const uint32_t w0 = idx - q0 * 3u;   // digit 0 ∈ {0,1,2}
+    const uint32_t w1 = q0  - q1 * 3u;   // digit 1 ∈ {0,1,2}
+    const uint32_t w2 = q1  - q2 * 3u;   // digit 2 ∈ {0,1,2}
+    const uint32_t w3 = q2;               // digit 3 ∈ {0,1,2}
+    // Pack and shift {0,1,2} -> {-1,0,+1} with one vector instruction.
+    return __vsubss4(w0 | (w1 << 8) | (w2 << 16) | (w3 << 24), 0x01010101u);
 }
 
 static __device__ __forceinline__ float vec_dot_bpt1_0_q8_1(
