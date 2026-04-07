@@ -1268,35 +1268,24 @@ static __device__ __forceinline__ float vec_dot_bpt1_0_q8_1(
 
     const block_bpt1_0 * bq = (const block_bpt1_0 *) vbq + kbx;
 
-    // Bit offset of group iqs within each 56-bit supergroup.
-    // Constant per thread (iqs does not change across the j-loop).
-    const int shift = iqs * 7;
+    // The 7-bit group at position iqs within a 7-byte supergroup starts at bit iqs*7.
+    //   iqs 0-3: bits [0:27]  -> entirely in bytes 0-3, shift = iqs*7       (max end bit = 27 < 32)
+    //   iqs 4-7: bits [28:55] -> entirely in bytes 3-6, shift = iqs*7 - 24  (max end bit = 55-24=31)
+    // One unconditional 32-bit load per j-iteration, one variable 32-bit shift.
+    // Both word_byte and word_shift are constant per thread — hoisted out of the j-loop.
+    const int word_byte  = (iqs >= 4) ? 3 : 0;
+    const int word_shift = (iqs >= 4) ? (iqs * 7 - 24) : (iqs * 7);
 
     float sumf = 0.0f;
 
 #pragma unroll
     for (int j = 0; j < QR_BPT1_0; ++j) {
-        const uint8_t * base = bq->qs + j * 7;
+        uint32_t word;
+        memcpy(&word, bq->qs + j * 7 + word_byte, 4);
+        const int idx = (word >> word_shift) & 0x7F;
 
-        // Load only the 32-bit word(s) needed for this iqs:
-        //   iqs 0-3: bits [0:31]  -> lo only
-        //   iqs 4:   both lo and hi (group straddles the lo/hi boundary)
-        //   iqs 5-7: bits [24:55] -> hi only
-        // Predicated loads — no warp divergence, just masked execution.
-        uint32_t lo = 0, hi = 0;
-        if (iqs <= 4) memcpy(&lo, base,     4);
-        if (iqs >= 4) memcpy(&hi, base + 3, 4);
-
-        // Reconstruct the 56-bit supergroup as a 64-bit integer, then extract
-        // the 7-bit group index with a single variable shift.
-        //   sg bit k (0≤k≤55): bytes 0..3 in lo, bytes 3..6 in hi (overlap at byte 3 is consistent).
-        const uint64_t sg  = (uint64_t)lo | ((uint64_t)hi << 24);
-        const int      idx = (int)((sg >> shift) & 0x7F);
-
-        // Decode weights arithmetically — no LUT random access.
         const int wpack = bpt1_0_decode4((uint32_t)idx);
-
-        const int acts = get_int_b4(bq8_1[j].qs, iqs);
+        const int acts  = get_int_b4(bq8_1[j].qs, iqs);
         sumf += __half2float(bq8_1[j].ds.x) * ggml_cuda_dp4a(wpack, acts, 0);
     }
 

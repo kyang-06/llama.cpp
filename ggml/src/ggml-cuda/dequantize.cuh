@@ -92,14 +92,15 @@ static __device__ __forceinline__ void dequantize_bpt1_0(const void * vx, const 
     const int g   = grp & 7;   // group within supergroup: 0..7
     const int pos = iqs & 3;   // 0 or 2
 
-    // Extract the 7-bit group index using 64-bit reconstruction (no switch).
-    // lo = bits [31:0], hi<<24 = bits [55:24] of the 56-bit supergroup.
+    // Extract the 7-bit group index using a single 32-bit load + shift.
+    //   g 0-3: bits [0:27]  -> bytes 0-3, shift = g*7
+    //   g 4-7: bits [28:55] -> bytes 3-6, shift = g*7 - 24
     const uint8_t * base = x[ib].qs + sg * 7;
-    uint32_t lo = 0, hi = 0;
-    if (g <= 4) memcpy(&lo, base,     4);
-    if (g >= 4) memcpy(&hi, base + 3, 4);
-    const uint64_t sg64 = (uint64_t)lo | ((uint64_t)hi << 24);
-    const uint32_t idx  = (uint32_t)((sg64 >> (g * 7)) & 0x7F);
+    const int word_byte  = (g >= 4) ? 3 : 0;
+    const int word_shift = (g >= 4) ? (g * 7 - 24) : (g * 7);
+    uint32_t word;
+    memcpy(&word, base + word_byte, 4);
+    const uint32_t idx = (word >> word_shift) & 0x7F;
 
     // Arithmetic base-3 decode — no loop, no LUT.
     const uint32_t q0 = __umulhi(idx, 0xAAAAAAABu) >> 1;  // floor(idx / 3)
