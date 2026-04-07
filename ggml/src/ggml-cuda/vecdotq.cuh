@@ -1248,28 +1248,6 @@ static __device__ __forceinline__ float vec_dot_iq4_xs_q8_1(
 
 #define VDR_BPT1_0_Q8_1_MMVQ 1
 
-// Arithmetic base-3 decode: 4 ternary weights {-1,0,+1} from 7-bit index ∈ [0,80].
-//
-// All three quotients are computed directly from idx (independent, no serial chain):
-//   floor(idx/ 3) via __umulhi(idx, 0xAAAAAAABu) >> 1   (= (idx*0xAAAAAAAB) >> 33)
-//   floor(idx/ 9) via __umulhi(idx, 0x1C71C71Du)         (= (idx*0x1C71C71D) >> 32)
-//   floor(idx/27) via __umulhi(idx, 0x097B425Fu)         (= (idx*0x097B425F) >> 32)
-// All verified correct for idx ∈ [0, 80].
-//
-// Remainders give ternary digits ∈ {0,1,2}; each fits in one byte with no masking needed.
-// __vsubss4 subtracts 1 from all 4 bytes in a single PTX instruction.
-static __device__ __forceinline__ int bpt1_0_decode4(uint32_t idx) {
-    const uint32_t q0 = __umulhi(idx, 0xAAAAAAABu) >> 1;  // floor(idx /  3)
-    const uint32_t q1 = __umulhi(idx, 0x1C71C71Du);        // floor(idx /  9)  — independent of q0
-    const uint32_t q2 = __umulhi(idx, 0x097B425Fu);        // floor(idx / 27)  — independent of q0, q1
-    const uint32_t w0 = idx - q0 * 3u;   // digit 0 ∈ {0,1,2}
-    const uint32_t w1 = q0  - q1 * 3u;   // digit 1 ∈ {0,1,2}
-    const uint32_t w2 = q1  - q2 * 3u;   // digit 2 ∈ {0,1,2}
-    const uint32_t w3 = q2;               // digit 3 ∈ {0,1,2}
-    // Pack and shift {0,1,2} -> {-1,0,+1} with one vector instruction.
-    return __vsubss4(w0 | (w1 << 8) | (w2 << 16) | (w3 << 24), 0x01010101u);
-}
-
 static __device__ __forceinline__ float vec_dot_bpt1_0_q8_1(
     const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs) {
 
@@ -1278,7 +1256,6 @@ static __device__ __forceinline__ float vec_dot_bpt1_0_q8_1(
     // The 7-bit group at position iqs within a 7-byte supergroup starts at bit iqs*7.
     //   iqs 0-3: bits [0:27]  -> entirely in bytes 0-3, shift = iqs*7       (max end bit = 27 < 32)
     //   iqs 4-7: bits [28:55] -> entirely in bytes 3-6, shift = iqs*7 - 24  (max end bit = 55-24=31)
-    // One unconditional 32-bit load per j-iteration, one variable 32-bit shift.
     // Both word_byte and word_shift are constant per thread — hoisted out of the j-loop.
     const int word_byte  = (iqs >= 4) ? 3 : 0;
     const int word_shift = (iqs >= 4) ? (iqs * 7 - 24) : (iqs * 7);
@@ -1291,7 +1268,9 @@ static __device__ __forceinline__ float vec_dot_bpt1_0_q8_1(
         memcpy(&word, bq->qs + j * 7 + word_byte, 4);
         const int idx = (word >> word_shift) & 0x7F;
 
-        const int wpack = bpt1_0_decode4((uint32_t)idx);
+        // bpt1_0_decode_lut: 128-entry __device__ table in L1-cached global memory.
+        // Avoids 3 mul.hi + arithmetic per group (vs TQ2_0's pure bit-ops).
+        const int wpack = (int)bpt1_0_decode_lut[idx];
         const int acts  = get_int_b4(bq8_1[j].qs, iqs);
         sumf += __half2float(bq8_1[j].ds.x) * ggml_cuda_dp4a(wpack, acts, 0);
     }

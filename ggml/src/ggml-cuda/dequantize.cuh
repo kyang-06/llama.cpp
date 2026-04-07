@@ -102,19 +102,17 @@ static __device__ __forceinline__ void dequantize_bpt1_0(const void * vx, const 
     memcpy(&word, base + word_byte, 4);
     const uint32_t idx = (word >> word_shift) & 0x7F;
 
-    // Arithmetic base-3 decode — all quotients independent from idx (no serial chain).
-    const uint32_t q0 = __umulhi(idx, 0xAAAAAAABu) >> 1;  // floor(idx /  3)
-    const uint32_t q1 = __umulhi(idx, 0x1C71C71Du);        // floor(idx /  9)
-    const uint32_t q2 = __umulhi(idx, 0x097B425Fu);        // floor(idx / 27)
+    // Decode via L1-cached LUT — avoids 3 mul.hi per group.
+    const uint32_t wpack = bpt1_0_decode_lut[idx];
 
-    // pos=0: weights 0 and 1;  pos=2: weights 2 and 3
+    // pos=0: weights 0 and 1 (bytes 0,1);  pos=2: weights 2 and 3 (bytes 2,3)
     int wa, wb;
     if (pos == 0) {
-        wa = (int)(idx - q0 * 3u) - 1;   // w[0] = idx%3      - 1
-        wb = (int)(q0  - q1 * 3u) - 1;   // w[1] = (idx/3)%3  - 1
+        wa = (int8_t)( wpack        & 0xFF);   // w[0]
+        wb = (int8_t)((wpack >>  8) & 0xFF);   // w[1]
     } else {
-        wa = (int)(q1  - q2 * 3u) - 1;   // w[2] = (idx/9)%3  - 1
-        wb = (int)q2 - 1;                 // w[3] = idx/27     - 1
+        wa = (int8_t)((wpack >> 16) & 0xFF);   // w[2]
+        wb = (int8_t)( wpack >> 24);            // w[3]
     }
     v.x = d * (float)wa;
     v.y = d * (float)wb;
