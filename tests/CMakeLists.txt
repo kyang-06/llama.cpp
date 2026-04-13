@@ -239,6 +239,14 @@ endif()
 llama_build_and_test(test-gguf.cpp)
 llama_build_and_test(test-backend-ops.cpp)
 
+# Linear projection throughput benchmark (not a CTest, run manually)
+# Links only against ggml-base to avoid pulling in llama/common/AMX dependencies.
+add_executable(bench-linear bench-linear.cpp)
+target_link_libraries(bench-linear PRIVATE ggml)
+target_include_directories(bench-linear PRIVATE ${CMAKE_SOURCE_DIR}/ggml/include)
+# Allow unresolved shared-lib symbols (e.g. AMX stubs in pre-built libggml-cpu)
+target_link_options(bench-linear PRIVATE -Wl,--allow-shlib-undefined)
+
 llama_build_and_test(test-model-load-cancel.cpp LABEL "model")
 llama_build_and_test(test-autorelease.cpp       LABEL "model")
 llama_build_and_test(test-backend-sampler.cpp   LABEL "model")
